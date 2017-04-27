@@ -1,0 +1,32 @@
+projects:
+  - num: 3
+    basename: clusterproject-c
+    ifexists: default
+    tuning: default
+    users:
+      - num: 2
+        role: admin
+        basename: demo
+        password: demo
+        userpassfile: /etc/origin/openshift-passwd
+    services:
+      - num: 3
+        file: default
+        basename: testservice
+    pods:
+      - total: 100
+      - num: 110
+        image: openshift/hello-openshift:v1.0.6
+        basename: hellopods
+        file: default
+        storage:
+          - type: none 
+
+tuningsets:
+  - name: default
+    pods:
+      stepping:
+        stepsize: 5
+        pause: 10 s
+      rate_limit:
+        delay: 250 ms
