@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+# import hashlib
 import json, subprocess, time, copy, sys, os, yaml, tempfile, shutil, math, re
 from datetime import datetime
 from clusterloaderstorage import *
@@ -22,13 +23,13 @@ def calc_time(timestr):
 
 def oc_command(args, globalvars):
     tmpfile=tempfile.NamedTemporaryFile()
-    # see https://github.com/openshift/origin/issues/7063 for details why this is done. 
+    # see https://github.com/openshift/origin/issues/7063 for details why this is done.
     shutil.copyfile(globalvars["kubeconfig"], tmpfile.name)
     ret = subprocess.check_output("KUBECONFIG="+tmpfile.name+" "+args, shell=True)
     if globalvars["debugoption"]:
         print args
     if args.find("oc process") == -1:
-        print ret 
+        print ret
     tmpfile.close()
     return ret
 
@@ -68,6 +69,58 @@ def get_route():
 
     return localhost, router_ip, routes_list
 
+def generate_bloated_is(count, globalvars, is_list=[], labelled=False, tagged=False):
+    """
+    Pushes tagged/labelled imagestream objects to openshift registry.
+
+    @is_list
+    list of URLS from which Openshift ImageStreams would be created.
+    Example: ['docker.io/busybox'].
+
+    @labelled
+    If true, labels are assigned as random strings to ImageStreams
+
+    @tagged
+    If true, ImageStreams are tagged
+    """
+    if globalvars["debugoption"]:
+        print "%s called" % repr(generate_bloated_is)
+
+    is_names = []
+    for repo in is_list:
+        is_name = repo.replace('/','_').replace('.','')
+        check = oc_command("oc import-image %s --from=%s --confirm" % (is_name, repo),
+                            globalvars)
+        if 'completed successfully' in check:
+            is_names.append(is_name)
+        else:
+            print("import for %s failed." % is_name)
+
+    count_per_is = count // len(is_names)
+    leftover_count = count % len(is_names)
+
+    def iterate_is_patch(is_name, beg, end):
+        for count in range(beg, end):
+            _key = is_name + str(count)
+            # hashlib.md5((is_name + str(count)).encode('utf-8')).hexdigest()
+            _val = count+1
+            labels = { _key: _val }
+            # tag = "%s:%d" % (is_name, count)
+            labels = json.dumps(labels)
+            CMD = """oc patch is/%s --patch '{ "metadata": { "labels": %s }}'""" % \
+                    (is_name, labels)
+            check = oc_command(CMD, globalvars)
+            if globalvars["debugoption"]:
+                print check
+
+    for is_name in is_names:
+        # for each IS object, generate count_per_is labelled / tagged objects
+        iterate_is_patch(is_name, 1, count_per_is+1)
+
+    # if not an absolute factor, pickup last IS object
+    # and make leftover_count objects from that..
+    iterate_is_patch(is_names[-1], count_per_is, count_per_is+leftover_count+1)
+
 def create_template(templatefile, num, parameters, globalvars):
     if globalvars["debugoption"]:
         print "create_template function called"
@@ -89,12 +142,12 @@ def create_template(templatefile, num, parameters, globalvars):
             extra_param['GUN'] = gun_env
         else:
             gun_param = any(param for param in parameters if param.get('GUN'))
-            
+
             if not gun_param:
                 extra_param['GUN'] = localhost
 
         gun_port_env = os.environ.get('GUN_PORT')
-        
+
         if gun_port_env:
             extra_param['GUN_PORT'] = gun_port_env
         else:
@@ -122,7 +175,7 @@ def create_template(templatefile, num, parameters, globalvars):
         tmpfile=tempfile.NamedTemporaryFile()
         templatejson = copy.deepcopy(data)
         cmdstring = "oc process -f %s" % templatefile
-        
+
         if parameters:
             for parameter in parameters:
                 for key, value in parameter.iteritems():
@@ -213,45 +266,45 @@ def create_pods(podcfg, num, storagetype, globalvars):
     pend_pods = globalvars["pend_pods"]
     while i < int(num):
         if storagetype in ("ebs", "EBS"):
-            # it is necessary to create ebs/pv/pvc for every pod, and pod file has to updated dinamically 
-            ebs_create(globalvars) 
+            # it is necessary to create ebs/pv/pvc for every pod, and pod file has to updated dinamically
+            ebs_create(globalvars)
             tmpfile=tempfile.NamedTemporaryFile()
             datapod = copy.deepcopy(data)
             podname = datapod["metadata"]["name"] + str(i)
             datapod["metadata"]["name"] = podname
 
             datapod["spec"]["containers"][0]["volumeMounts"] = [{"mountPath" : mountdir ,"name": ebsvolumeid }]
-            datapod["spec"]["volumes"] = [{"name": ebsvolumeid, "persistentVolumeClaim": { "claimName": ebsvolumeid }}] 
-            # update pod 
+            datapod["spec"]["volumes"] = [{"name": ebsvolumeid, "persistentVolumeClaim": { "claimName": ebsvolumeid }}]
+            # update pod
             globalvars["curprojenv"]["pods"].append(podname)
             json.dump(datapod, open("podfilexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
             json.dump(datapod, tmpfile)
             tmpfile.flush()
 
         elif storagetype in ("ceph", "CEPH"):
-            ceph_image_create(i,globalvars) # this will create pv/pvc/image - one at time 
-            tmpfile = tempfile.NamedTemporaryFile() 
+            ceph_image_create(i,globalvars) # this will create pv/pvc/image - one at time
+            tmpfile = tempfile.NamedTemporaryFile()
             datapod = copy.deepcopy(data)
             podname = datapod["metadata"]["name"] + str(i)
             datapod["metadata"]["name"] = podname
 
             datapod["spec"]["containers"][0]["volumeMounts"] = [{"mountPath" : mountdir , "name": "cephvol" + str(i) }]
-            datapod["spec"]["volumes"] = [{"name": "cephvol" + str(i) , "persistentVolumeClaim": { "claimName": "cephclaim" + str(i) }}] 
-            # update pod 
+            datapod["spec"]["volumes"] = [{"name": "cephvol" + str(i) , "persistentVolumeClaim": { "claimName": "cephclaim" + str(i) }}]
+            # update pod
             globalvars["curprojenv"]["pods"].append(podname)
             json.dump(datapod, open("podfilexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
             json.dump(datapod, tmpfile)
-            tmpfile.flush() 
+            tmpfile.flush()
 
             """
-            # do here ceph pv test configuration 
+            # do here ceph pv test configuration
             elif storagetype in ("nfs", "NFS"):
-            # do here nfs pv test configuration 
+            # do here nfs pv test configuration
             elif storagetype in ("gluster", "GLUSTER"):
-            # do here gluster configuration 
-            """ 
+            # do here gluster configuration
+            """
 
-        # here will be added ceph_create/gluster_create / nfs_create / iscsi_create storage backends 
+        # here will be added ceph_create/gluster_create / nfs_create / iscsi_create storage backends
         else:
             tmpfile=tempfile.NamedTemporaryFile()
             datapod = copy.deepcopy(data)
@@ -421,11 +474,11 @@ def single_project(testconfig, projname, globalvars):
             oc_command("kubectl create -f %s" % tmpfile.name,globalvars)
             oc_command("kubectl label --overwrite namespace " + projname +" purpose=test", globalvars)
         else:
-            oc_command("oc new-project " + projname,globalvars)      
+            oc_command("oc new-project " + projname,globalvars)
             oc_command("oc label --overwrite namespace " + projname +" purpose=test", globalvars)
     else:
         pass
-    
+
     time.sleep(1)
     projenv={}
 
@@ -433,7 +486,7 @@ def single_project(testconfig, projname, globalvars):
         tuningset = globalvars["tuningset"]
     if "tuning" in testconfig:
         projenv["tuning"] = testconfig["tuning"]
-    globalvars["curprojenv"] = projenv  
+    globalvars["curprojenv"] = projenv
     globalvars["namespace"] = projname
     if "quota" in testconfig:
         quota_handler(testconfig["quota"],globalvars)
@@ -490,7 +543,7 @@ def autogen_pod_handler(globalvars):
    print "Load completed"
 
 def autogen_pod_wait(pods_running, num_expected):
-    while len(pods_running) != num_expected: 
+    while len(pods_running) != num_expected:
         pods_running = subprocess.check_output(
             "oc get pods --all-namespaces --selector=test --no-headers | "
             " awk '/1\/1/ && /Running/ {print $1,$2;}'", shell=True).splitlines()
@@ -564,7 +617,7 @@ def template_handler(templates, globalvars):
     for template in templates:
         num = int(template["num"])
         templatefile = template["file"]
-        
+
         if "parameters" in template:
             parameters = template["parameters"]
         else:
@@ -605,8 +658,8 @@ def service_handler(inputservs, globalvars):
 
 
 def ebs_create(globalvars):
-    # just calling this function to create EBS, pv and pvc, EBS volume id == pv name == pvc name 
-    # names does not influence anything 
+    # just calling this function to create EBS, pv and pvc, EBS volume id == pv name == pvc name
+    # names does not influence anything
 
     namespace = globalvars["namespace"]
     globalvars["curprojenv"]["services"] = []
@@ -616,9 +669,9 @@ def ebs_create(globalvars):
         pvjson = json.load(pvstream)
     pvjson["metadata"]["name"] = ebsvolumeid
     pvjson["spec"]["capacity"]["storage"] = str(ebsvolumesize) + "Gi"  # this has to be like this till k8s 23357 is fixed
-    pvjson["spec"]["accessModes"] = [pvpermissions] 
-    pvjson["spec"]["awsElasticBlockStore"]["volumeID"] = ebsvolumeid 
-    pvjson["spec"]["awsElasticBlockStore"]["fsType"] = fstype 
+    pvjson["spec"]["accessModes"] = [pvpermissions]
+    pvjson["spec"]["awsElasticBlockStore"]["volumeID"] = ebsvolumeid
+    pvjson["spec"]["awsElasticBlockStore"]["fsType"] = fstype
     pvtmpfile = tempfile.NamedTemporaryFile(delete=True)
     json.dump(pvjson,open("pvebsexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
     json.dump(pvjson,pvtmpfile,sort_keys=True, indent=4, separators=(',', ': '))
@@ -628,33 +681,33 @@ def ebs_create(globalvars):
         check = oc_command("kubectl create -f " + pvtmpfile.name, globalvars)
     else:
         check = oc_command("oc create -f " + pvtmpfile.name , globalvars)
-    
+
     pvtmpfile.close()
 
     with open("content/pvc-default.json", "r") as pvcstream:
         pvcjson = json.load(pvcstream)
-    pvcjson["metadata"]["name"] = ebsvolumeid 
-    pvcjson["metadata"]["namespace"] = namespace 
+    pvcjson["metadata"]["name"] = ebsvolumeid
+    pvcjson["metadata"]["namespace"] = namespace
     pvcjson["spec"]["resources"]["requests"]["storage"] = str(ebsvolumesize) + "Gi"
     pvcjson["spec"]["accessModes"] = [pvcpermissions]
     pvctmpfile = tempfile.NamedTemporaryFile(delete=True)
     json.dump(pvcjson, open("pvcebsexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
     json.dump(pvcjson,pvctmpfile,sort_keys=True, indent=4, separators=(',', ': '))
-    pvctmpfile.flush() 
+    pvctmpfile.flush()
     if globalvars["kubeopt"]:
-        check = oc_command("kubectl create -f " + pvctmpfile.name, globalvars) 
+        check = oc_command("kubectl create -f " + pvctmpfile.name, globalvars)
         # why we have both kubectl and oc? kubectl will to all
     else:
-        check = oc_command("oc create -f " + pvctmpfile.name, globalvars) 
+        check = oc_command("oc create -f " + pvctmpfile.name, globalvars)
         pvctmpfile.close()
 
-# this function creates CEPH secret 
+# this function creates CEPH secret
 def ceph_secret_create(cephsecret,globalvars):
     namespace = globalvars["namespace"]
     with open("content/ceph-secret.json") as cephsec:
         cephsecjson = json.load(cephsec)
-    
-    cephsecjson["metadata"]["name"] = cephsecretname 
+
+    cephsecjson["metadata"]["name"] = cephsecretname
     cephsecjson["metadata"]["namespace"] = namespace
     cephsecjson["data"]["key"] = cephsecret
     sectmpfile = tempfile.NamedTemporaryFile(delete=True)
@@ -662,28 +715,28 @@ def ceph_secret_create(cephsecret,globalvars):
     json.dump(cephsecjson, sectmpfile, sort_keys=True, indent=4, separators=(',', ': '))
     sectmpfile.flush()
 
-    # create ceph sec 
+    # create ceph sec
     if globalvars["kubeopt"]:
         check = oc_command("kubectl create -f " + sectmpfile.name, globalvars)
     else:
         check = oc_command("oc create -f " + sectmpfile.name, globalvars)
         sectmpfile.close()
 
-# this function will create pv/pvc based on ceph image 
+# this function will create pv/pvc based on ceph image
 def ceph_image_create(i,globalvars):
     """
-    This function will prepare pv/pvc file for case when pods 
+    This function will prepare pv/pvc file for case when pods
     will use gluster volume for persistent storage
-    """ 
+    """
     namespace = globalvars["namespace"]
     globalvars["curprojenv"]["services"] = []
     cephimagename = "cephimage" + str(i)
     imagesize = 1024**3*int(cephimagesize)
 
-    # ceph_volume function will create ceph images at ceph storage cluster side 
+    # ceph_volume function will create ceph images at ceph storage cluster side
     ceph_volume(cephpool,cephimagename,imagesize)
     with open("content/pv-ceph.json") as pvstream:
-        pvjson = json.load(pvstream) 
+        pvjson = json.load(pvstream)
 
     pvjson["metadata"]["name"] =  "cephvol" + str(i)
     pvjson["metadata"]["namespace"] = namespace
@@ -692,8 +745,8 @@ def ceph_image_create(i,globalvars):
     pvjson["spec"]["rbd"]["monitors"] = [x + str(":") + str(6789) for x in cephmonitors]
     pvjson["spec"]["rbd"]["pool"] = cephpool
     pvjson["spec"]["rbd"]["image"] = "cephimage" + str(i)
-    pvjson["spec"]["rbd"]["user"] = "admin" 
-    pvjson["spec"]["rbd"]["secretRef"]["name"] = cephsecretname 
+    pvjson["spec"]["rbd"]["user"] = "admin"
+    pvjson["spec"]["rbd"]["secretRef"]["name"] = cephsecretname
 
     pvtmpfile = tempfile.NamedTemporaryFile(delete=True)
     json.dump(pvjson,open("pvcephexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
@@ -705,7 +758,7 @@ def ceph_image_create(i,globalvars):
         check = oc_command("kubectl create -f " + pvtmpfile.name, globalvars)
     else:
         check = oc_command("oc create -f " + pvtmpfile.name , globalvars)
-    
+
     pvtmpfile.close()
 
     with open("content/pvc-default.json", "r") as pvcstream:
@@ -717,17 +770,17 @@ def ceph_image_create(i,globalvars):
     pvctmpfile = tempfile.NamedTemporaryFile(delete=True)
     json.dump(pvcjson, open("pvccephexample.json", "w+"), sort_keys=True, indent=4, separators=(',', ': '))
     json.dump(pvcjson,pvctmpfile,sort_keys=True, indent=4, separators=(',', ': '))
-    pvctmpfile.flush() 
+    pvctmpfile.flush()
     if globalvars["kubeopt"]:
-        check = oc_command("kubectl create -f " + pvctmpfile.name, globalvars) 
+        check = oc_command("kubectl create -f " + pvctmpfile.name, globalvars)
         # why we have both kubectl and oc? kubectl will to all
     else:
-        check = oc_command("oc create -f " + pvctmpfile.name, globalvars) 
+        check = oc_command("oc create -f " + pvctmpfile.name, globalvars)
         pvctmpfile.close()
 
-# gluster_image_create and nfs_image_create will be added 
+# gluster_image_create and nfs_image_create will be added
 """
-def gluster_image_create(): 
+def gluster_image_create():
 """
 """
 def nfs_image_create():
@@ -743,7 +796,7 @@ def pod_handler(inputpods, globalvars):
 
     global storagetype,ebsvolumesize, ebsvtype, ebsregion, ebstagprefix, mountdir, \
     pvpermissions, pvcpermissions, nfsshare, nfsip, volumesize, glustervolume, \
-    glusterip, cephpool , cephmonitors, cephimagesize, cephsecret, cephsecretname, fstype 
+    glusterip, cephpool , cephmonitors, cephimagesize, cephsecret, cephsecretname, fstype
 
     if storage[0]["type"] in ("none", "None", "n"):
         storagetype = storage[0]["type"]
@@ -789,22 +842,22 @@ def pod_handler(inputpods, globalvars):
         cephmonitors = storage[0]["cephmonitors"]
         cephimagesize = storage[0]["cephimagesize"]
         cephsecretname = storage[0]["cephsecretname"]
-        cephsecret = storage[0]["cephsecret"] 
+        cephsecret = storage[0]["cephsecret"]
         mountdir = storage[0]["mountdir"]
         fstype = storage[0]["fstype"]
         pvpermissions = storage[0]["pvpermissions"]
         pvcpermissions = storage[0]["pvcpermissions"]
-        # if CEPH is specified, we have to create ceph secret on OSE master 
-        # before creating pv/pvc/pod, secrete needs to be created 
-        # only once , treating this as one time run variable 
-        ceph_secret_create(cephsecret,globalvars) 
+        # if CEPH is specified, we have to create ceph secret on OSE master
+        # before creating pv/pvc/pod, secrete needs to be created
+        # only once , treating this as one time run variable
+        ceph_secret_create(cephsecret,globalvars)
         print ("Storage type CEPH specified, ensure that OSE master is configured to reach CEPH cluster and ceph monitors", cephmonitors)
 
 
     globalvars["curprojenv"]["pods"] = []
     if "tuningset" in globalvars:
         globalvars["podtuningset"] = globalvars["tuningset"]
-    
+
     globalvars["pend_pods"] = []
     if "podtuningset" in globalvars:
         if "stepping" in globalvars["podtuningset"]:
@@ -832,7 +885,7 @@ def pod_handler(inputpods, globalvars):
         del(globalvars["podtuningset"])
         del(globalvars["totalpods"])
     del(globalvars["pend_pods"])
-    
+
 
 def rc_handler(inputrcs, globalvars):
     if globalvars["debugoption"]:
